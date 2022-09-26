@@ -59,3 +59,6 @@ results.json
 
 # sqlite databases
 *.sqlite
+
+# python
+/python3.8/
