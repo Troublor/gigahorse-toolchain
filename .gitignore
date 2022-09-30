@@ -62,3 +62,6 @@ results.json
 
 # python
 /python3.8/
+
+/*.hex
+/facts
