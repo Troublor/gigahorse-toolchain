@@ -30,7 +30,7 @@ INITIALIZE_STATEMENT_INSERTOR(_insertor, to)
   .decl Statement_Next(stmt: Statement, next: Statement)
   .decl Statement_Opcode(stmt: Statement, op: Opcode)
   .decl PushValue(stmt: Statement, value: Value)
-      
+
   // Outputs
   .decl Out_Statement_Next(stmt: Statement, next: Statement)
   .decl Out_Statement_Opcode(stmt: Statement, op: Opcode)
@@ -229,52 +229,80 @@ INITIALIZE_STATEMENT_INSERTOR(_insertor, to)
 }
 
 /**
-  
+  Abstract block cloner.
+  Subcomponents just need to override and provide facts for BlockCloningCandidate.
 */
-.comp BlockCloner : CodeTransformer {
+.comp AbstractBlockCloner <LocalAnalysis> : CodeTransformer {
 
-  .init analysis = GlobalAnalysis<TransactionalContext>
+  .init analysis = LocalAnalysis
   //.init analysis = PreTransLocalAnalysis
+
+  //.limitsize analysis.BlockOutputContents(n=500000)
 
   analysis.PushValue(push, val):- PushValue(push, val).
   analysis.Statement_Opcode(stmt, op):- Statement_Opcode(stmt, op).
   analysis.Statement_Next(stmt, stmtNext):- Statement_Next(stmt, stmtNext).
 
-  .output Out_Statement_Opcode, Out_Statement_Next, Out_PushValue
-  .output Statement_Opcode, Statement_Next, PushValue
-  // find the last statement in the original bytecode, start adding from there.
-  .decl MaxOriginalStatement(stmt:Statement)
+  .decl Prev_Block_OriginalBlock(block: Block, originalBlock: Block)
+  .decl In_Block_OriginalBlock(block: Block, originalBlock: Block)
+
+  // The last `statement` in the original bytecode, start adding cloned code after it.
+  .decl MaxOriginalStatement(statement: Statement)
+
   // compute the block size to use on the cloned blocks
-  .decl BlockSize(block:Block, size:number)
-  // find the offset (numeric diff from block head) of every statement, helps with cloning
-  .decl Statement_BlockOffset(statement:Statement, block:Block, offset:number)
+  .decl BlockSize(block: Block, size: number)
 
-  .decl DirectBlockEdge(from:Block, to:Block)
+  // The `offset` (numeric diff from `block` head) of every `statement`, helps with cloning
+  .decl Statement_BlockOffset(statement: Statement, block: Block, offset: number)
 
-  .decl ClonedBlockAddressPushedBy(pushBlock:Block, pushStmt:Statement, blockToClone:Block)
+  .decl DirectBlockEdge(from: Block, to: Block)
 
-  .decl BlockPushedToStack(pushStmt:Statement, pushedVar:Variable, pushedBlock:Block)
+  .decl ClonedBlockAddressPushedBy(pushBlock: Block, pushStmt: Statement, blockToClone: Block)
+
+  /**
+    Direct subcomponents provide different definitions of this rule
+    to fit their different safety guarantee levels.
+  */
+  .decl BlockPushedToStack(pushStmt: Statement, pushedVar: Variable, pushedBlock: Block)
   .decl BlockPushesBlockToStack(from: Block, pushedBlock: Block)
 
-  .decl BlockCloningCandidate(candidate:Block)
-  // To make this more flexible we'll be performing the cloning at the use level:
-  //   pick the interesting blocks
-  //   find their uses (pushes to the stack) that we want to clone
-  // Basic way to compute this would be to only inline blocks for direct jumps
-  .decl BlockToClone(pushBlock:Block, blockToClone:Block)
-  // For each fact of BlockToClone we create an identifier and sort them based on it
-  .decl BlockToCloneOpID(pushBlock:Block, blockToClone:Block, opID:symbol)
+  /**
+    Candidate blocks to be cloned.
+    Subcomponents need to override this and add facts to that.
+    Not all will be cloned, filtering and sanity checking is needed.
+  */
+  .decl BlockCloningCandidate(candidate: Block) overridable
+  DEBUG_OUTPUT(BlockCloningCandidate)
 
-  // After we compute the order of the inserted clone blocks, we assign each cloned instance to a starting bytecode offset.
-  .decl BlockToCloneNewInstance(pushBlock:Block, blockToClone:Block, generatedBlock:Block)
+  /**
+    To make this more flexible we'll be performing the cloning at the def level:
+      pick the interesting blocks
+      find their def (pushes to the stack) that we want to clone
+    Basic way to compute this would be to only inline blocks for direct jumps
+  */
 
-  .decl StatementToClonedStatement(pushBlock:Block, blockToClone:Block, stmt:Statement, generatedStatement:Statement)
-  .output StatementToClonedStatement
+  // Create a new instance of `blockToClone` for its definition in `pushBlock`
+  .decl BlockToClone(pushBlock: Block, blockToClone: Block)
+
+  // For each fact of `BlockToClone` we create an identifier (`opID`) and order them based on it
+  .decl BlockToCloneOpID(pushBlock: Block, blockToClone: Block, opID: symbol)
+
+  /**
+    After we compute the order of the inserted clone blocks,
+    we assign each cloned instance to a starting bytecode offset (`generatedBlock`).
+  */
+  .decl BlockToCloneNewInstance(pushBlock: Block, blockToClone: Block, generatedBlock: Block)
+
+  // `generatedStatement` will be the `stmt` of `blockToClone` when cloned in `pushBlock`
+  .decl StatementToClonedStatement(pushBlock: Block, blockToClone: Block, stmt: Statement, generatedStatement: Statement)
+  DEBUG_OUTPUT(StatementToClonedStatement)
+
   .init cloneOpSorter = OrdAscentingSorter
 
-  .decl Block_OriginalBlock(block:Block, originalBlock:Block)
-  .output Block_OriginalBlock
-  .output BlockToClone, DirectBlockEdge, BlockPushedToStack, BlockPushesBlockToStack, BlockToCloneNewInstance, ClonedBlockAddressPushedBy
+  // mapping output blocks (cloned and non-cloned) to the blocks in the original bytecode
+  .decl Block_OriginalBlock(block: Block, originalBlock: Block)
+  DEBUG_OUTPUT(Block_OriginalBlock)
+  DEBUG_OUTPUT(BlockToClone)
 
   MaxOriginalStatement(as(maxStmt, Statement)):-
     maxStmtNumber = max stmtNumber : { Statement_Opcode(stmt, _), stmtNumber = @hex_to_number(stmt)},
@@ -302,63 +330,21 @@ INITIALIZE_STATEMENT_INSERTOR(_insertor, to)
     BlockPushedToStack(pushStmt, _, blockToClone),
     analysis.Statement_Block(pushStmt, pushBlock).
 
-  BlockPushedToStack(pushStmt, pushedVar, as(pushedBlock, Block)):-
-    analysis.Variable_Value(pushedVar, pushedBlock),
-    analysis.VariableAlwaysUsedAsJumpTarget(pushedVar),
-    analysis.JUMPDEST(as(pushedBlock, Statement)),
-    analysis.Statement_Defines(pushStmt, pushedVar).
-
   BlockPushesBlockToStack(block, pushedBlock):-
     BlockPushedToStack(pushStmt, _, pushedBlock),
     analysis.Statement_Block(pushStmt, block).
-    // REVIEW: Silly way to try to ensure that this block value is not used for something else
-    // Ideally when this is deployed we'd have to use some whole-contract logic
-    //!analysis.Statement_Uses_Local(_, blockVar, _).
-
-  .decl PossibleCallerWithReturn(caller:Block, return:Block)
-  .output PossibleCallerWithReturn, BlockPushesCloningCandidate
-  PossibleCallerWithReturn(caller, as(val, Block)):-
-    analysis.ImmediateBlockJumpTarget(caller, targetVar),
-    analysis.Variable_Value(targetVar, target),
-    analysis.JUMPDEST(as(target, symbol)),
-    analysis.Statement_Block(stmt, caller),
-    analysis.Statement_Defines(stmt, var),
-    analysis.Variable_Value(var, val),
-    analysis.JUMPDEST(as(val, symbol)),
-    !analysis.Statement_Uses_Local(_, var, _).
-
 
   .decl FallthroughBlock(block: Block)
   FallthroughBlock(block):-
     analysis.Statement_Block(fallthrough, block),
     analysis.FallthroughStmt(fallthrough, _).
 
-  /*
-    Cloning candidates. Add more cases with heuristics.
-    At some point we may want to add an option to clone based on the imprecision
-    reported by a previous execution. 
-  */
 
-.decl BlockPushesCloningCandidate(pushBlk:Block, candidate:Block)
+.decl BlockPushesCloningCandidate(pushBlk: Block, candidate: Block)
 
   BlockPushesCloningCandidate(pushBlk, candidate):-
     BlockPushesBlockToStack(pushBlk, candidate),
     BlockCloningCandidate(candidate).
-
-  BlockCloningCandidate(candidate):-
-    analysis.StackBalanceBlock(candidate).
-
-  // caller-side return blocks that are shared between call-sites
-  BlockCloningCandidate(candidate):-
-    PossibleCallerWithReturn(from, candidate),
-    PossibleCallerWithReturn(from2, candidate),
-    from != from2.
-    // BlockPushesBlockToStack(from, candidate),
-    // BlockPushesBlockToStack(from2, candidate),
-    // from != from2,
-    // 1 != 1,
-    // !DirectBlockEdge(from, candidate),
-    // !DirectBlockEdge(from2, candidate).
 
   // Clone all candidate blocks  for all the blocks that push them
   // Make sure they can be cloned safely 
@@ -372,7 +358,6 @@ INITIALIZE_STATEMENT_INSERTOR(_insertor, to)
     // Make sure we don't break any CODECOPY stmts
     !analysis.CODECOPYStatement(_, as(to,Value), _).
 
-  .output analysis.StackBalanceBlock, BlockCloningCandidate
 
   BlockToCloneOpID(pushBlock, blockToClone, cat(pushBlock, blockToClone)):-
     BlockToClone(pushBlock, blockToClone).
@@ -445,11 +430,120 @@ INITIALIZE_STATEMENT_INSERTOR(_insertor, to)
     PushValue(oldStmt, val),
     StatementToClonedStatement(_, _, oldStmt, clonedStmt).
 
-  Block_OriginalBlock(block, block):-
-    analysis.Statement_Block(_, block).
+  In_Block_OriginalBlock(block, block):-
+    analysis.Statement_Block(_, block),
+    !Prev_Block_OriginalBlock(_, _).
   
+  In_Block_OriginalBlock(block, originalBlock):-
+    Prev_Block_OriginalBlock(block, originalBlock).
+
+  // REVIEW: Do we need to care about empty blocks?
   Block_OriginalBlock(block, originalBlock):-
-    BlockToCloneNewInstance(_, originalBlock, block).
+    analysis.Statement_Block(_, block),
+    In_Block_OriginalBlock(block, originalBlock).
+
+  Block_OriginalBlock(block, originalBlock):-
+    BlockToCloneNewInstance(_, intermediateBlock, block),
+    In_Block_OriginalBlock(intermediateBlock, originalBlock).
+}
+
+/**
+  BlockCloner using an underlying global analysis to ensure that the
+  program's semantics will not break. To be used in most cases.
+*/
+.comp SafeBlockCloner : AbstractBlockCloner <DefaultOptimizedGlobalAnalysis> {
+
+  BlockPushedToStack(pushStmt, pushedVar, as(pushedBlock, Block)):-
+    analysis.Variable_Value(pushedVar, pushedBlock),
+    // requires global analysis
+    analysis.VariableAlwaysUsedAsJumpTarget(pushedVar),
+    analysis.JUMPDEST(as(pushedBlock, Statement)),
+    analysis.Statement_Defines(pushStmt, pushedVar).
+}
+
+/**
+  BlockCloner using an underlying local analysis, therefore providing less
+  guarantees.  
+  __To be used with caution for shallow cloning.__
+*/
+.comp UnsafeBlockCloner : AbstractBlockCloner <PreTransLocalAnalysis> {
+
+  BlockPushedToStack(pushStmt, pushedVar, as(pushedBlock, Block)):-
+    analysis.Variable_Value(pushedVar, pushedBlock),
+    analysis.JUMPDEST(as(pushedBlock, Statement)),
+    analysis.Statement_Defines(pushStmt, pushedVar).
+}
+
+/**
+  Simple cloner, targets shared `REVERT` blocks.
+  Can help with memory modeling, as well as source decompilation.
+*/
+.comp RevertBlockCloner : UnsafeBlockCloner {
+
+  .override BlockCloningCandidate
+
+  BlockCloningCandidate(revertBlock):-
+    analysis.REVERT(revertStmt),
+    analysis.Statement_Block(revertStmt, revertBlock),
+    analysis.Variable_Value(targetVar1, as(revertBlock, Value)),
+    analysis.ImmediateBlockJumpTarget(caller1, targetVar1),
+    analysis.Variable_Value(targetVar2, as(revertBlock, Value)),
+    analysis.ImmediateBlockJumpTarget(caller2, targetVar2),
+    caller1 != caller2.
+}
+/**
+  Heuristic based cloner implementation, gives good results, non-negligible slowdown
+*/
+.comp HeuristicBlockCloner : SafeBlockCloner {
+
+  .override BlockCloningCandidate
+
+  .decl PossibleCallerWithReturn(caller: Block, return: Block)
+  PossibleCallerWithReturn(caller, as(val, Block)):-
+    analysis.ImmediateBlockJumpTarget(caller, targetVar),
+    analysis.Variable_Value(targetVar, target),
+    analysis.JUMPDEST(as(target, symbol)),
+    analysis.Statement_Block(stmt, caller),
+    analysis.Statement_Defines(stmt, var),
+    analysis.Variable_Value(var, val),
+    analysis.JUMPDEST(as(val, symbol)),
+    !analysis.Statement_Uses_Local(_, var, _).
+
+  // SL: Too general, causes slowdown
+  BlockCloningCandidate(candidate):-
+    analysis.StackBalanceBlock(candidate).
+
+  // SL: Doesn't give too much
+  BlockCloningCandidate(candidate):-
+    analysis.NonImmediateBlockJumpTargetEscapes(candidate).
+
+  // caller-side return blocks that are shared between call-sites
+  // SL: Best heuristic so far, targets functions.dl level precision loss
+  BlockCloningCandidate(candidate):-
+    PossibleCallerWithReturn(from, candidate),
+    PossibleCallerWithReturn(from2, candidate),
+    from != from2.
+    // BlockPushesBlockToStack(from, candidate),
+    // BlockPushesBlockToStack(from2, candidate),
+    // from != from2,
+    // 1 != 1,
+    // !DirectBlockEdge(from, candidate),
+    // !DirectBlockEdge(from2, candidate).
+}
+
+/**
+  Guided block cloning, taking advantage of imprecision results of a previous decompilation run
+  Not used right now as its results were worse than using HeuristicBlockCloner
+*/
+.comp InputBlockCloner : SafeBlockCloner {
+
+  .override BlockCloningCandidate
+
+  .decl InputBlockCloningCandidate(block: Block)
+  .input InputBlockCloningCandidate(IO="file", filename="InputBlockCloningCandidate.csv", delimiter="\t")
+  
+  BlockCloningCandidate(block):-
+    InputBlockCloningCandidate(block).
 }
 
 // Adding analytic here to 
