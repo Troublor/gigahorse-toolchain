@@ -1,18 +1,26 @@
 
-/*
-  Base, Abstract context sensitivity component
-  Is configured using an instantiation of LocalAnalysis
+/**
+  Base, Abstract context sensitivity component.
+  Is configured using an instantiation of LocalAnalysis.
+
+  The Context type is defined by the context implementation components.
+  A little hacky to refference it without defining it first but its the cleanest approach I found .
 */
 .comp AbstractContextSensitivity <LocalAnalysis> {
-  // The Context type is defined by the context implementation components
-  // A little hacky to use without defining but its the cleanest approach I found 
+  /**
+    Blocks directly following `caller` under `ctx` will be reachable under `newContext`
+  */
   .decl MergeContext(ctx: Context, caller: Block, newContext: Context)
 
   .decl IsContext(ctx: Context)
   .decl InitialContext(ctx: Context)
 
-  // REVIEW: Moved it here as it is used irregardless of the ctx sens.
-  .decl Context_PublicFunction(ctx:Context, pubFun:symbol)
+  /**
+    Context is reachable under PublicFunction identified by its sighash.
+    Only useful for contexts with a public function component
+    REVIEW: Moved it here as it is used irregardless of the ctx sensivity flavor
+  */
+  .decl Context_PublicFunction(ctx: Context, pubFun: symbol)
 
   .init local = LocalAnalysis
 
@@ -32,6 +40,9 @@
 */
 
 .comp VariableDepthContextSensitivity <LocalAnalysis> : AbstractContextSensitivity <LocalAnalysis> {
+  /**
+    Maximum context depth, currently ignores the `sigHash` parameter
+  */
   .decl MaxContextDepth(sigHash: symbol, d: number)
 
   .decl InputMaxContextDepth(d: number)
@@ -107,6 +118,21 @@
   MergeContext(ctx, caller, ctx) :-
     MaxContextDepth(_, 0),
     ReachableContext(ctx, caller).
+
+  // For in-depth metrics
+  .decl ContextContainsBlock(ctx: Context, blk: Block, index: number)
+  .decl ContextContainsBlockTimes(ctx: Context, blk: Block, times: number)
+
+  ContextContainsBlock(ctx, blk, 0):-
+    DecomposeContext(ctx, blk, _).
+
+  ContextContainsBlock(ctx, blk, i + 1):-
+    DecomposeContext(ctx, _, rest),
+    ContextContainsBlock(rest, blk, i).
+
+  ContextContainsBlockTimes(ctx, blk, times):-
+    ContextContainsBlock(ctx, blk, _),
+    times = count : ContextContainsBlock(ctx, blk, _).
 }
 
 
@@ -226,6 +252,26 @@
     ReachableContext(ctx, _),
     ctx = [pubFun, callCtx],
     callCtx = callCtx.
+
+  // Helpers
+  .decl PrivateContextContainsBlock(ctx: PrivateContext, blk: Block, index: number)
+  .decl ContextContainsBlock(ctx: Context, blk: Block, index: number)
+  .decl ContextContainsBlockTimes(ctx: Context, blk: Block, times: number)
+
+  PrivateContextContainsBlock(priCtx, blk, 0):-
+    DecomposePrivateContext(priCtx, blk, _).
+
+  PrivateContextContainsBlock(priCtx, blk, i + 1):-
+    DecomposePrivateContext(priCtx, _, rest),
+    PrivateContextContainsBlock(rest, blk, i).
+
+  ContextContainsBlock(ctx, blk, i):-
+    DecomposeContext(ctx, _, priCtx),
+    PrivateContextContainsBlock(priCtx, blk, i).
+
+  ContextContainsBlockTimes(ctx, blk, times):-
+    ContextContainsBlock(ctx, blk, _),
+    times = count : ContextContainsBlock(ctx, blk, _).
 
   /**
     Public function jump case for MergeContext
